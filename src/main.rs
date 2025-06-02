@@ -14,7 +14,7 @@ fn main() -> Result<(), eframe::Error> {
         .expect("The icon data must be valid");
     let mut options = eframe::NativeOptions::default();
 
-    options.viewport = egui::ViewportBuilder::default().with_inner_size([600.0, 320.0]);
+    options.viewport = egui::ViewportBuilder::default().with_inner_size([600.0, 500.0]);
     options.viewport.icon = Some(Arc::new(icon));
     eframe::run_native(
         "Ferris Vault - Password Generator",
@@ -155,11 +155,17 @@ impl eframe::App for App {
                 ui.add(egui::TextEdit::singleline(&mut self.key_input).password(true));
 
                 if ui
-                    .button(if self.set_master_key {
-                        "Guardar clave"
-                    } else {
-                        "Ingresar"
-                    })
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new(if self.set_master_key {
+                                "Guardar clave"
+                            } else {
+                                "Ingresar"
+                            })
+                            .color(egui::Color32::WHITE), // texto blanco
+                        )
+                        .fill(egui::Color32::from_rgb(0, 122, 255)), // azul (color estilo iOS)
+                    )
                     .clicked()
                 {
                     if self.key_input.len() < 4 {
@@ -206,7 +212,15 @@ impl eframe::App for App {
             ui.checkbox(&mut self.include_symbols, "Include symbols");
 
             ui.add_space(10.0);
-            if ui.button("Generate password").clicked() {
+            if ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new("Generate password").color(egui::Color32::WHITE), // texto blanco
+                    )
+                    .fill(egui::Color32::from_rgb(0, 122, 255)), // azul
+                )
+                .clicked()
+            {
                 self.generate_password();
             }
 
@@ -218,7 +232,16 @@ impl eframe::App for App {
                 ui.horizontal(|ui| {
                     ui.label("Save as:");
                     ui.text_edit_singleline(&mut self.save_title);
-                    if ui.button("💾 Save Password").clicked() {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("📋 Save Password")
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(egui::Color32::from_rgb(0, 122, 255)),
+                        )
+                        .clicked()
+                    {
                         if let Some(key) = &self.master_key {
                             if !self.save_title.trim().is_empty() {
                                 let title = self.save_title.trim().to_string();
@@ -278,11 +301,27 @@ impl eframe::App for App {
                         }
 
                         let btn_label = if show { "Hide" } else { "Show" };
-                        if ui.button(btn_label).clicked() {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(btn_label).color(egui::Color32::WHITE),
+                                )
+                                .fill(egui::Color32::from_rgb(0, 0, 0)),
+                            )
+                            .clicked() {
                             self.show_passwords.insert(title.clone(), !show);
                         }
 
-                        if ui.button("📋").on_hover_text("Copy").clicked() {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("📋").color(egui::Color32::WHITE),
+                                )
+                                .fill(egui::Color32::from_rgb(152, 152, 152)),
+                            )
+                            .on_hover_text("Copy")
+                            .clicked()
+                        {
                             let key_clone = self.master_key.clone();
                             let password_clone = password.clone();
                             let copy_tx_clone = self.copy_tx.clone();
@@ -296,7 +335,16 @@ impl eframe::App for App {
                             });
                         }
 
-                        if ui.button("❌").on_hover_text("Delete").clicked() {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new("❌").color(egui::Color32::BLACK),
+                                )
+                                .fill(egui::Color32::from_rgb(253, 75, 75)),
+                            )
+                            .on_hover_text("Delete")
+                            .clicked()
+                        {
                             to_delete = Some(title.clone());
                         }
                     });
