@@ -1,8 +1,13 @@
+use crossbeam_channel::{Receiver, Sender};
 use eframe::egui;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+mod crypto;
+use crypto::decrypt::decrypt;
+use crypto::encrypt::encrypt;
+use crypto::master_key::{hash_master_key, load_master_key_hash, save_master_key_hash};
 
 fn main() -> Result<(), eframe::Error> {
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("assets/icon.png"))
@@ -22,6 +27,7 @@ fn main() -> Result<(), eframe::Error> {
 struct SavedPasswords {
     entries: HashMap<String, String>,
 }
+
 struct App {
     length: usize,
     include_numbers: bool,
@@ -31,12 +37,30 @@ struct App {
     save_title: String,
     saved_passwords: HashMap<String, String>,
     show_passwords: HashMap<String, bool>,
+    key_input: String,
+    master_key: Option<String>,
+    set_master_key: bool,
+    master_key_error: Option<String>,
+    authenticated: bool,
+    decrypted_cache: HashMap<String, String>,
+    pending_decryption: HashMap<String, bool>,
+    tx: Sender<(String, String)>,
+    rx: Receiver<(String, String)>,
+    save_tx: Sender<(String, String, String)>,
+    save_rx: Receiver<(String, String, String)>,
+    copy_tx: Sender<String>,
+    copy_rx: Receiver<String>,
 }
 
 impl Default for App {
     fn default() -> Self {
         let mut saved_passwords = HashMap::new();
         let mut show_passwords = HashMap::new();
+        let authenticated = false;
+        let set_master_key = load_master_key_hash().is_none();
+        let (tx, rx) = crossbeam_channel::unbounded();
+        let (save_tx, save_rx) = crossbeam_channel::unbounded();
+        let (copy_tx, copy_rx) = crossbeam_channel::unbounded();
 
         if let Ok(json) = std::fs::read_to_string("src/passwords.json") {
             if let Ok(parsed) = serde_json::from_str::<SavedPasswords>(&json) {
@@ -56,6 +80,19 @@ impl Default for App {
             save_title: String::new(),
             saved_passwords,
             show_passwords,
+            key_input: String::new(),
+            master_key: None,
+            set_master_key,
+            master_key_error: None,
+            authenticated,
+            decrypted_cache: HashMap::new(),
+            pending_decryption: HashMap::new(),
+            tx,
+            rx,
+            save_tx,
+            save_rx,
+            copy_tx,
+            copy_rx,
         }
     }
 }
@@ -86,7 +123,74 @@ impl App {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Password Generator 🔒");
+            while let Ok((title, decrypted)) = self.rx.try_recv() {
+                self.decrypted_cache.insert(title.clone(), decrypted);
+                self.pending_decryption.remove(&title);
+            }
+            while let Ok(text) = self.copy_rx.try_recv() {
+                ctx.output_mut(|o| o.copied_text = text);
+            }
+
+            while let Ok((title, encrypted, _)) = self.save_rx.try_recv() {
+                self.saved_passwords.insert(title.clone(), encrypted);
+                self.show_passwords.insert(title, false);
+
+                let json = serde_json::to_string_pretty(&SavedPasswords {
+                    entries: self.saved_passwords.clone(),
+                })
+                .unwrap();
+
+                std::fs::write("src/passwords.json", json).ok();
+            }
+
+            if !self.authenticated {
+                ui.heading("🔐 Ingresar clave maestra");
+                ui.add_space(10.0);
+                ui.label(if self.set_master_key {
+                    "Definí tu nueva clave maestra. Recordá que no se puede recuperar."
+                } else {
+                    "Ingresá tu clave maestra para desbloquear las contraseñas."
+                });
+
+                ui.add(egui::TextEdit::singleline(&mut self.key_input).password(true));
+
+                if ui
+                    .button(if self.set_master_key {
+                        "Guardar clave"
+                    } else {
+                        "Ingresar"
+                    })
+                    .clicked()
+                {
+                    if self.key_input.len() < 4 {
+                        self.master_key_error = Some("La clave es muy corta".into());
+                    } else if self.set_master_key {
+                        let hash = hash_master_key(&self.key_input);
+                        save_master_key_hash(&hash);
+                        self.set_master_key = false;
+                        self.master_key = Some(self.key_input.clone());
+                        self.authenticated = true;
+                    } else if let Some(saved_hash) = load_master_key_hash() {
+                        let hash = hash_master_key(&self.key_input);
+                        if hash == saved_hash {
+                            self.master_key = Some(self.key_input.clone());
+                            self.authenticated = true;
+                        } else {
+                            self.master_key_error = Some("Clave incorrecta".into());
+                        }
+                    }
+                    self.key_input.clear();
+                }
+
+                if let Some(err) = &self.master_key_error {
+                    ui.colored_label(egui::Color32::RED, err);
+                }
+
+                return;
+            }
+
+            ui.heading("🔒 Password Generator");
+
             ui.add_space(10.0);
             ui.horizontal(|ui| {
                 ui.label("Number of characters:");
@@ -100,11 +204,12 @@ impl eframe::App for App {
             ui.checkbox(&mut self.include_uppercase, "Include uppercase letters");
             ui.checkbox(&mut self.include_numbers, "Include numbers");
             ui.checkbox(&mut self.include_symbols, "Include symbols");
+
             ui.add_space(10.0);
             if ui.button("Generate password").clicked() {
                 self.generate_password();
             }
-            ui.add_space(10.0);
+
             if !self.password.is_empty() {
                 ui.separator();
                 ui.label("Password Generated:");
@@ -114,23 +219,25 @@ impl eframe::App for App {
                     ui.label("Save as:");
                     ui.text_edit_singleline(&mut self.save_title);
                     if ui.button("💾 Save Password").clicked() {
-                        if !self.save_title.trim().is_empty() {
-                            let key = self.save_title.trim().to_string();
-                            self.saved_passwords
-                                .insert(key.clone(), self.password.clone());
-                            self.show_passwords.insert(key.clone(), false);
-                            self.save_title.clear();
+                        if let Some(key) = &self.master_key {
+                            if !self.save_title.trim().is_empty() {
+                                let title = self.save_title.trim().to_string();
+                                let password = self.password.clone();
+                                let key = key.clone();
+                                let tx = self.save_tx.clone();
 
-                            let json = serde_json::to_string_pretty(&SavedPasswords {
-                                entries: self.saved_passwords.clone(),
-                            })
-                            .unwrap();
+                                std::thread::spawn(move || {
+                                    let encrypted = encrypt(&password, &key);
+                                    let _ = tx.send((title, encrypted, "".to_string()));
+                                });
 
-                            std::fs::write("src/passwords.json", json).ok();
+                                self.save_title.clear();
+                            }
                         }
                     }
                 });
             }
+
             if !self.saved_passwords.is_empty() {
                 ui.separator();
                 ui.heading("Saved Passwords 🔑");
@@ -140,11 +247,32 @@ impl eframe::App for App {
 
                 for (title, password) in &self.saved_passwords {
                     let show = self.show_passwords.get(title).copied().unwrap_or(false);
-
                     ui.horizontal(|ui| {
                         ui.label(format!("📌 {}:", title));
+
                         if show {
-                            ui.code(password);
+                            if let Some(cached) = self.decrypted_cache.get(title) {
+                                ui.code(cached);
+                            } else if self.pending_decryption.get(title).is_none() {
+                                self.pending_decryption.insert(title.clone(), true);
+
+                                let title_clone = title.clone();
+                                let password_clone = password.clone();
+                                let key_clone = self.master_key.clone();
+                                let tx_clone = self.tx.clone();
+
+                                std::thread::spawn(move || {
+                                    if let Some(key) = key_clone {
+                                        if let Some(decrypted) = decrypt(&password_clone, &key) {
+                                            let _ = tx_clone.send((title_clone, decrypted));
+                                        }
+                                    }
+                                });
+
+                                ui.label("⏳ Deciphering...");
+                            } else {
+                                ui.label("⏳ Deciphering...");
+                            }
                         } else {
                             ui.label("••••••••••");
                         }
@@ -154,15 +282,21 @@ impl eframe::App for App {
                             self.show_passwords.insert(title.clone(), !show);
                         }
 
-                        if ui
-                            .button("📋")
-                            .on_hover_text("Copiar al portapapeles")
-                            .clicked()
-                        {
-                            ctx.output_mut(|o| o.copied_text = password.clone());
+                        if ui.button("📋").on_hover_text("Copy").clicked() {
+                            let key_clone = self.master_key.clone();
+                            let password_clone = password.clone();
+                            let copy_tx_clone = self.copy_tx.clone();
+
+                            std::thread::spawn(move || {
+                                if let Some(key) = key_clone {
+                                    if let Some(decrypted) = decrypt(&password_clone, &key) {
+                                        let _ = copy_tx_clone.send(decrypted);
+                                    }
+                                }
+                            });
                         }
 
-                        if ui.button("❌").clicked() {
+                        if ui.button("❌").on_hover_text("Delete").clicked() {
                             to_delete = Some(title.clone());
                         }
                     });
